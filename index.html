@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>HART Serial Debugger</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 30px; background: #f8f9fa; }
+    h1 { color: #2c3e50; margin-bottom: 10px; text-align: center; }
+    h3 { color: #495057; margin: 30px 0 15px; text-align: center; }
+    #controls { margin: 20px 0; text-align: center; }
+    button { padding: 10px 20px; font-size: 16px; margin: 6px; border: none; border-radius: 6px; cursor: pointer; color: white; }
+    #connectBtn { background: #28a745; }
+    #connectBtn:hover { background: #218838; }
+    #clearBtn { background: #6c757d; }
+    #disconnectBtn { background: #6c757d; }
+    .preset-btn { background: #007bff; min-width: 220px; }
+    .preset-btn:hover { background: #0056b3; }
+    #manualArea { margin: 25px auto; max-width: 900px; text-align: left; }
+    #manualArea label { display: block; font-weight: bold; margin-bottom: 8px; color: #495057; }
+    #manualHex { width: 100%; height: 80px; padding: 12px; font-family: monospace; font-size: 15px; border: 1px solid #ced4da; border-radius: 6px; resize: vertical; }
+    #sendManualBtn { background: #dc3545; margin-top: 10px; width: 100%; }
+    #sendManualBtn:hover { background: #c82333; }
+    #log-container { margin: 20px auto; width: 95%; max-width: 1100px; border: 1px solid #ced4da; background: white; border-radius: 8px; overflow: hidden; }
+    #log { height: 420px; overflow-y: auto; padding: 15px 15px 15px 20px; font-family: 'Courier New', monospace; font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; text-align: left; }
+    .entry { margin-bottom: 12px; padding: 8px 10px; border-bottom: 1px dashed #ddd; background: #f9f9f9; border-radius: 4px; text-align: left; }
+    .timestamp { color: #777; font-size: 12px; margin-right: 10px; }
+    .sent { color: #c41e3a; font-weight: bold; }
+    .recv { color: #006400; font-weight: bold; }
+    .decode { color: #6f42c1; font-weight: bold; font-style: italic; }
+    .error { color: #dc3545; font-weight: bold; }
+    #status { font-weight: bold; font-size: 18px; color: #495057; margin: 15px 0; text-align: center; }
+    .presets { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px; max-width: 1100px; margin: 0 auto 30px; }
+    .preset-item { text-align: center; }
+    .preset-item h4 { margin: 0 0 8px; font-size: 14px; color: #2c3e50; font-weight: bold; }
+    .preset-item button { width: 100%; background: #007bff; }
+    .preset-item button:hover { background: #0056b3; }
+    footer { margin-top: 40px; text-align: center; color: #6c757d; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>HART Serial Debugger</h1>
+
+  <div id="controls">
+    <button id="connectBtn">Connect (1200, 8-O-1)</button>
+    <button id="clearBtn">Clear Log</button>
+    <button id="disconnectBtn" disabled>Disconnect</button>
+  </div>
+
+  <div id="status">Status: Belum connect</div>
+
+  <h3>Preset Commands</h3>
+  <div class="presets">
+    <div class="preset-item"><h4>Command 0: Initialize</h4><button class="preset-btn" id="sendCmd0" disabled>Send</button></div>
+    <div class="preset-item"><h4>Command 1: Read PV</h4><button class="preset-btn" id="sendCmd1" disabled>Send</button></div>
+    <div class="preset-item"><h4>Command 2: Read Current and Percent</h4><button class="preset-btn" id="sendCmd2" disabled>Send</button></div>
+    <div class="preset-item"><h4>Command 3: Read PV SV TV QV</h4><button class="preset-btn" id="sendCmd3" disabled>Send</button></div>
+    <div class="preset-item"><h4>Command 18: Write TAG, Descriptor, Date</h4><button class="preset-btn" id="sendCmd18" disabled>Send</button></div>
+    <div class="preset-item"><h4>Command 22: Write Long Tag (32 char)</h4><button class="preset-btn" id="sendCmd22" disabled>Send</button></div>
+  </div>
+
+  <div id="manualArea">
+    <label for="manualHex">Input Raw Hex (bebas format, spasi boleh):</label>
+    <textarea id="manualHex" placeholder="Contoh: 05 atau AA BB CC DD atau raw apapun"></textarea>
+    <button id="sendManualBtn" disabled>Send Raw Hex</button>
+  </div>
+
+  <div id="log-container">
+    <div id="log"></div>
+  </div>
+
+  <footer>© ibmgrx 2026</footer>
+
+  <script>
+    let port = null;
+    let reader = null;
+    let writer = null;
+    let recvBuffer = '';
+    let recvTimeout = null;
+
+    const logEl = document.getElementById("log");
+    const statusEl = document.getElementById("status");
+    const manualInput = document.getElementById("manualHex");
+
+    function logEntry(type, msg) {
+      const entry = document.createElement("div");
+      entry.className = "entry";
+      const ts = new Date().toLocaleTimeString('id-ID', {hour12: false, timeStyle: 'medium'});
+      entry.innerHTML = `<span class="timestamp">[${ts}]</span>`;
+      if (type === 'sent') entry.innerHTML += `<span class="sent">> ${msg}</span>`;
+      else if (type === 'recv') entry.innerHTML += `<span class="recv">< ${msg}</span>`;
+      else if (type === 'decode') entry.innerHTML += `<span class="decode">${msg}</span>`;
+      else if (type === 'error') entry.innerHTML += `<span class="error">ERROR: ${msg}</span>`;
+      logEl.appendChild(entry);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    const PRESETS = {
+      cmd0:  "FF FF FF FF FF FF FF 02 80 00 00 82",
+      cmd1:  "FF FF FF FF FF FF FF 82 A1 A8 00 00 00 01 00 8A",
+      cmd2:  "FF FF FF FF FF FF FF 82 A1 A8 00 00 00 02 00 89",
+      cmd3:  "FF FF FF FF FF FF FF 82 A1 A8 00 00 00 03 00 88"
+    };
+
+    function cleanAndParseHex(hexStr) {
+      const clean = hexStr.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
+      if (clean.length % 2 !== 0) throw new Error("Jumlah karakter hex ganjil");
+      return new Uint8Array(clean.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+    }
+
+    function bytesToHex(bytes) {
+      return [...bytes].map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+    }
+
+    const unitsMap = {
+      0x01: 'inH2O @ 68°F',
+      0x06: 'psi',
+      0x07: 'bar',
+      0x0C: 'kPa',
+      0x20: '°C',
+      0x21: '°F',
+      0x22: '°R',
+      0x23: 'K',
+      0x39: '°F',
+    };
+
+    function decodeUnits(code) {
+      return unitsMap[code] || `Unknown (0x${code.toString(16).toUpperCase()} / ${code})`;
+    }
+
+    function decodeFloat(bytes, pos) {
+      const slice = bytes.slice(pos, pos + 4);
+      if (slice.length < 4) return null;
+      const view = new DataView(slice.buffer, slice.byteOffset, 4);
+      return view.getFloat32(0, false);
+    }
+
+    function tryDecodeCmd1(bytes) {
+      if (bytes.length < 18) return;
+      let pos = 0;
+      while (pos < bytes.length && bytes[pos] === 0xFF) pos++;
+      if (pos + 12 > bytes.length) return;
+      const delimiter = bytes[pos++];
+      if (delimiter !== 0x86 && delimiter !== 0x8A) return;
+      pos += 5;
+      const cmd = bytes[pos++];
+      if (cmd !== 0x01) return;
+      const byteCount = bytes[pos++];
+      if (byteCount < 0x07) return;
+      const responseCode = bytes[pos++];
+      const deviceStatus = bytes[pos++];
+      if (responseCode !== 0x00) return;
+      const unitsCode = bytes[pos++];
+      const pvValue = decodeFloat(bytes, pos);
+      if (pvValue === null) return;
+      logEntry('decode', `[Cmd 1] PV: ${pvValue.toFixed(4)} ${decodeUnits(unitsCode)}`);
+      logEntry('decode', `   Status: 0x${deviceStatus.toString(16).padStart(2,'0').toUpperCase()}`);
+    }
+
+    function tryDecodeCmd2(bytes) {
+      if (bytes.length < 22) return;
+      let pos = 0;
+      while (pos < bytes.length && bytes[pos] === 0xFF) pos++;
+      if (pos + 12 > bytes.length) return;
+      const delimiter = bytes[pos++];
+      if (delimiter !== 0x86 && delimiter !== 0x8A) return;
+      pos += 5;
+      const cmd = bytes[pos++];
+      if (cmd !== 0x02) return;
+      const byteCount = bytes[pos++];
+      if (byteCount !== 0x0A) return;
+      const responseCode = bytes[pos++];
+      const deviceStatus = bytes[pos++];
+      if (responseCode !== 0x00) return;
+      const currentValue = decodeFloat(bytes, pos);
+      pos += 4;
+      const percentValue = decodeFloat(bytes, pos);
+      logEntry('decode', `[Cmd 2] Loop Current: ${currentValue.toFixed(4)} mA`);
+      logEntry('decode', `   Percent of Range: ${percentValue.toFixed(4)} %`);
+      logEntry('decode', `   Status: 0x${deviceStatus.toString(16).padStart(2,'0').toUpperCase()}`);
+    }
+
+    function tryDecodeCmd3(bytes) {
+      if (bytes.length < 30) return;
+      let pos = 0;
+      while (pos < bytes.length && bytes[pos] === 0xFF) pos++;
+      if (pos + 12 > bytes.length) return;
+      const delimiter = bytes[pos++];
+      if (delimiter !== 0x86 && delimiter !== 0x8A) return;
+      pos += 5;
+      const cmd = bytes[pos++];
+      if (cmd !== 0x03) return;
+      const byteCount = bytes[pos++];
+      if (byteCount < 0x09) return;
+      const responseCode = bytes[pos++];
+      const deviceStatus = bytes[pos++];
+      if (responseCode !== 0x00) return;
+      const currentValue = decodeFloat(bytes, pos);
+      pos += 4;
+      const pvUnits = bytes[pos++];
+      const pvValue = decodeFloat(bytes, pos);
+      pos += 4;
+      const svUnits = bytes[pos++];
+      const svValue = decodeFloat(bytes, pos);
+      pos += 4;
+      let tvValue = null;
+      let tvUnits = null;
+      if (pos + 5 <= bytes.length) {
+        tvUnits = bytes[pos++];
+        tvValue = decodeFloat(bytes, pos);
+        pos += 4;
+      }
+      let qvValue = null;
+      let qvUnits = null;
+      if (pos + 5 <= bytes.length) {
+        qvUnits = bytes[pos++];
+        qvValue = decodeFloat(bytes, pos);
+      }
+      logEntry('decode', `[Cmd 3] Loop Current: ${currentValue.toFixed(4)} mA`);
+      logEntry('decode', `   PV: ${pvValue.toFixed(4)} ${decodeUnits(pvUnits)}`);
+      logEntry('decode', `   SV: ${svValue.toFixed(4)} ${decodeUnits(svUnits)}`);
+      if (tvValue !== null) logEntry('decode', `   TV: ${tvValue.toFixed(4)} ${decodeUnits(tvUnits)}`);
+      if (qvValue !== null) logEntry('decode', `   QV: ${qvValue.toFixed(4)} ${decodeUnits(qvUnits)}`);
+      logEntry('decode', `   Status: 0x${deviceStatus.toString(16).padStart(2,'0').toUpperCase()}`);
+    }
+
+    // Command 18 (tetap dari referensi sebelumnya, tidak diubah)
+    function packASCII(str, byteLen) {
+      const numChars = (byteLen * 4) / 3;
+      str = str.toUpperCase().padEnd(numChars, ' ').slice(0, numChars);
+      const bytes = new Uint8Array(byteLen);
+      let charIdx = 0;
+      for (let i = 0; i < byteLen; i += 3) {
+        const c1 = str.charCodeAt(charIdx++) & 0x3F;
+        const c2 = str.charCodeAt(charIdx++) & 0x3F;
+        const c3 = str.charCodeAt(charIdx++) & 0x3F;
+        const c4 = str.charCodeAt(charIdx++) & 0x3F;
+        bytes[i] = (c1 << 2) | (c2 >> 4);
+        bytes[i + 1] = ((c2 & 0x0F) << 4) | (c3 >> 2);
+        bytes[i + 2] = ((c3 & 0x03) << 6) | c4;
+      }
+      return bytes;
+    }
+
+    async function sendCmd18() {
+      if (!writer) return logEntry('error', "Belum connect");
+
+      const tagStr = prompt("Tag (Max 8 Char):", "UNIT-01")?.trim().slice(0,8) || '';
+      if (!tagStr) return;
+
+      const descStr = prompt("Descriptor (Max 16 Char):", "PRESS TRANSMITER")?.trim().slice(0,16) || '';
+      if (!descStr) return;
+
+      const dateVal = prompt("Date (YYYY-MM-DD):", new Date().toISOString().split('T')[0]) || '';
+      const date = new Date(dateVal);
+      if (isNaN(date)) return logEntry('error', "Tanggal tidak valid");
+
+      const d = date.getDate();
+      const m = date.getMonth() + 1;
+      const y = date.getFullYear() - 1900;
+
+      const tagPacked = packASCII(tagStr, 6);
+      const descPacked = packASCII(descStr, 12);
+      const dateBytes = [d, m, y];
+
+      const payload = [...tagPacked, ...descPacked, ...dateBytes];
+
+      const header = [0x82, 0xA1, 0xA8, 0x00, 0x00, 0x00, 0x12, 0x15];
+      const frameBody = [...header, ...payload];
+
+      let lrc = 0;
+      for (let b of frameBody) lrc ^= b;
+
+      const preamble = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+      const fullFrame = new Uint8Array([...preamble, ...frameBody, lrc]);
+
+      await writer.write(fullFrame);
+      logEntry('sent', bytesToHex(fullFrame) + " (Command 18 - Write Tag)");
+      recvBuffer = '';
+    }
+
+    // --- COMMAND 22: Write Long Tag (ASCII biasa, 32 bytes langsung) ---
+    async function sendCmd22() {
+      if (!writer) return logEntry('error', "Belum connect");
+
+      const longTag = prompt("Long Tag (max 32 char):", "LONG TAG FOR DEVICE IDENTIFICATION")?.trim().slice(0,32).padEnd(32, ' ') || '';
+      if (!longTag) return;
+
+      // ASCII biasa: setiap char jadi 1 byte (Latin-1 / ISO 8859-1)
+      const tagBytes = new Uint8Array(32);
+      for (let i = 0; i < 32; i++) {
+        tagBytes[i] = longTag.charCodeAt(i) & 0xFF; // langsung ke byte
+      }
+
+      const header = [0x82, 0xA1, 0xA8, 0x00, 0x00, 0x00, 0x16, 0x20]; // Cmd 0x16, count 0x20 (32 bytes)
+
+      const frameBody = [...header, ...tagBytes];
+
+      let lrc = 0;
+      for (let b of frameBody) lrc ^= b;
+
+      const preamble = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+      const fullFrame = new Uint8Array([...preamble, ...frameBody, lrc]);
+
+      await writer.write(fullFrame);
+      logEntry('sent', bytesToHex(fullFrame) + " (Command 22 - Write Long Tag)");
+      recvBuffer = '';
+    }
+
+    // Decode Cmd 22: echo Long Tag 32 bytes sebagai string biasa
+    function tryDecodeCmd22(bytes) {
+      if (bytes.length < 40) return;
+      let pos = 0;
+      while (pos < bytes.length && bytes[pos] === 0xFF) pos++;
+      if (pos + 12 > bytes.length) return;
+      const delimiter = bytes[pos++];
+      if (delimiter !== 0x86 && delimiter !== 0x8A) return;
+      pos += 5;
+      const cmd = bytes[pos++];
+      if (cmd !== 0x16) return;
+      const byteCount = bytes[pos++];
+      if (byteCount !== 0x20) return;
+      const responseCode = bytes[pos++];
+      const deviceStatus = bytes[pos++];
+      if (responseCode !== 0x00) {
+        logEntry('decode', `[Cmd 22] ERROR: Response code 0x${responseCode.toString(16).padStart(2,'0').toUpperCase()}`);
+        return;
+      }
+      const tagBytes = bytes.slice(pos, pos + 32);
+      let longTag = '';
+      for (let b of tagBytes) {
+        longTag += String.fromCharCode(b);
+      }
+      logEntry('decode', `[Cmd 22 Success] Long Tag: ${longTag.trim()}`);
+      logEntry('decode', `   Status: 0x${deviceStatus.toString(16).padStart(2,'0').toUpperCase()}`);
+    }
+
+    async function connect() {
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 1200, dataBits: 8, stopBits: 1, parity: "odd", flowControl: "none" });
+        logEntry('recv', "Connected → 1200 baud, 8 data, odd parity, 1 stop");
+        statusEl.textContent = "Status: Connected";
+        document.getElementById("connectBtn").disabled = true;
+        document.getElementById("disconnectBtn").disabled = false;
+        document.querySelectorAll('.preset-btn, #sendManualBtn').forEach(btn => btn.disabled = false);
+        reader = port.readable.getReader();
+        readLoop();
+        writer = port.writable.getWriter();
+      } catch (err) {
+        logEntry('error', err.message);
+      }
+    }
+
+    async function readLoop() {
+      try {
+        while (true) {
+          const { value, done } = await reader.read().catch(err => {
+            logEntry('error', "Read error: " + err.message);
+            return { value: null, done: false };
+          });
+          if (done) break;
+          if (value && value.length > 0) {
+            recvBuffer += bytesToHex(value) + ' ';
+            if (recvTimeout) clearTimeout(recvTimeout);
+            recvTimeout = setTimeout(() => {
+              if (recvBuffer.trim()) {
+                const hexFull = recvBuffer.trim();
+                logEntry('recv', hexFull);
+                const cleanHex = hexFull.replace(/\s+/g, '');
+                if (cleanHex.length >= 30) {
+                  try {
+                    const bytes = cleanAndParseHex(cleanHex);
+                    let pos = 0;
+                    while (pos < bytes.length && bytes[pos] === 0xFF) pos++;
+                    if (pos + 10 < bytes.length) {
+                      pos += 6;
+                      const cmd = bytes[pos];
+                      if (cmd === 0x01) tryDecodeCmd1(bytes);
+                      if (cmd === 0x02) tryDecodeCmd2(bytes);
+                      if (cmd === 0x03) tryDecodeCmd3(bytes);
+                      if (cmd === 0x12) tryDecodeCmd18(bytes);
+                      if (cmd === 0x16) tryDecodeCmd22(bytes);
+                    }
+                  } catch (e) {}
+                }
+                recvBuffer = '';
+              }
+            }, 600);
+          }
+        }
+      } catch (err) {
+        logEntry('error', "Read error: " + err.message);
+      }
+    }
+
+    async function sendBytes(bytes, label = '') {
+      if (!writer) return logEntry('error', "Belum connect");
+      try {
+        await writer.write(bytes);
+        logEntry('sent', bytesToHex(bytes) + (label ? `  (${label})` : ''));
+        recvBuffer = '';
+      } catch (err) {
+        logEntry('error', "Gagal kirim: " + err.message);
+      }
+    }
+
+    async function sendPreset(key) {
+      const hex = PRESETS[key];
+      if (!hex) return logEntry('error', "Preset tidak ditemukan");
+      try {
+        const bytes = cleanAndParseHex(hex);
+        await sendBytes(bytes, key.replace('cmd', 'Command '));
+      } catch (err) {
+        logEntry('error', "Error preset: " + err.message);
+      }
+    }
+
+    async function sendManual() {
+      const input = manualInput.value.trim();
+      if (!input) return logEntry('error', "Input kosong");
+      try {
+        const bytes = cleanAndParseHex(input);
+        await sendBytes(bytes, 'Raw Manual');
+      } catch (err) {
+        logEntry('error', "Invalid hex: " + err.message);
+      }
+    }
+
+    async function disconnect() {
+      if (recvTimeout) clearTimeout(recvTimeout);
+      if (reader) await reader.cancel();
+      if (writer) await writer.close();
+      if (port) await port.close();
+      logEntry('recv', "Disconnected");
+      statusEl.textContent = "Status: Belum connect";
+      document.getElementById("connectBtn").disabled = false;
+      document.getElementById("disconnectBtn").disabled = true;
+      document.querySelectorAll('.preset-btn, #sendManualBtn').forEach(btn => btn.disabled = true);
+    }
+
+    document.getElementById("connectBtn").onclick = connect;
+    document.getElementById("disconnectBtn").onclick = disconnect;
+    document.getElementById("clearBtn").onclick = () => { logEl.innerHTML = ""; recvBuffer = ''; };
+    document.getElementById("sendManualBtn").onclick = sendManual;
+
+    document.getElementById("sendCmd0").onclick = () => sendPreset('cmd0');
+    document.getElementById("sendCmd1").onclick = () => sendPreset('cmd1');
+    document.getElementById("sendCmd2").onclick = () => sendPreset('cmd2');
+    document.getElementById("sendCmd3").onclick = () => sendPreset('cmd3');
+    document.getElementById("sendCmd18").onclick = sendCmd18;
+    document.getElementById("sendCmd22").onclick = sendCmd22;
+  </script>
+</body>
+</html>
