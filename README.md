@@ -3,6 +3,8 @@ HART Serial Debugger
 
 A lightweight, browser-based tool for debugging and configuring HART field devices via serial communication using the Web Serial API (Chrome/Edge only).
 
+![HART Serial Debugger Screenshot](screenshot.jpg)
+
 **Key Features**
 - Connects to serial ports at 1200 baud, 8-O-1 (standard HART)
 - Preset buttons for common universal commands:
